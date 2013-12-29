@@ -1,0 +1,52 @@
+#!/usr/bin/perl
+
+use Mojolicious::Lite;
+
+my $me = 'http://localhost:3000';
+my $manager = $$;
+
+# This route is to emulate a slow web request
+get '/:sleep' => {sleep => 0} => sub {
+	my $self = shift;
+	my $sleep = $self->param('sleep');
+	return $self->render(json=>{ok => Mojo::JSON->false, sleep => $sleep}) unless $sleep; # 0 seconds, just do it
+	$self->app->log->info("[$$] going to sleep for $sleep seconds");
+	$self->render_later; # Disable automatic rendering to delay response generation, only necessary if automatic rendering would result in a response.
+	Mojo::IOLoop->timer($sleep => sub {
+		$self->app->log->info("[$$] slept for $sleep seconds");
+		return $self->render(json=>{ok => Mojo::JSON->true, sleep => $sleep});
+	});
+	# Reaches here immediately after setting the timer; allows handling of additional requests before rendering of this route response occurs
+	# render_later keeps this route from generating an automatic response.
+	$self->app->log->info("[$$] sleeping in the background.  I *think* that means that [$$] can process subsequent app requests. ");
+};
+
+# Requires preforking server, and sufficient workers for the number of concurrent connections
+# In this particular example app, requires approx twice as many workers as concurrent connections
+#   One for the /blocking request and the other for the /:sleep request
+# Requires max_clients = 1
+get '/blocking/:sleep' => {sleep => 0} => sub {
+	my $self = shift;
+	return $self->render_not_found if $$ == $manager; # Disable this route if the app isn't prefork'd.
+	my $sleep = $self->param('sleep');
+	$self->app->log->info("Stand by while waiting for response from get request.  No other app requests will be processed by [$$] until get response received.");
+	$self->ua->get("$me/$sleep"); # Blocking...
+	# Won't reach here until a response is supplied to get
+	$self->render(text => "[$$] slept for $sleep seconds.  Blocked.\n");
+};
+
+# May benefit from additional workers, requires max_clients is sufficiently large (1000?)
+get '/non-blocking/:sleep' => {sleep => 0} => sub {
+	my $self = shift;
+	$self->render_later; # Disable automatic rendering to delay response generation, only necessary if automatic rendering would result in a response.
+	my $sleep = $self->param('sleep');
+	$self->ua->get("$me/$sleep" => sub { # Non-blocking
+		# This callback will be processed once a response is supplied to get
+		$self->render(text => "[$$] slept for $sleep seconds.  Didn't block.\n");
+	});
+	# Reaches here immediately after sending the get request; allows handling of additional requests before rendering of this route response occurs
+	# render_later keeps this route from generating an automatic response.
+	$self->app->log->info("Sent get request, [$$] proceeding to process subsequent app requests.");
+};
+ 
+app->start;
