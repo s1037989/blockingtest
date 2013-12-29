@@ -24,7 +24,8 @@ get '/:sleep' => {sleep => 0} => sub {
 # Requires preforking server, and sufficient workers for the number of concurrent connections
 # In this particular example app, requires approx twice as many workers as concurrent connections
 #   One for the /blocking request and the other for the /:sleep request
-# Requires max_clients = 1
+# Requires max_clients = 1.  If greater than 1 the Manager will direct subsequent app requests to workers in a block state.
+# If 1, the Manager will not direct any additional requests to a worker that already has a connection with a client.
 get '/blocking/:sleep' => {sleep => 0} => sub {
 	my $self = shift;
 	return $self->render_not_found if $$ == $manager; # Disable this route if the app isn't prefork'd.
