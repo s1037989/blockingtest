@@ -6,52 +6,63 @@ my $me = 'http://localhost:3000';
 my $manager = $$;
 
 # Requires preforking server, and sufficient workers for the number of concurrent connections
-# In this particular example app, requires approx twice as many workers as concurrent connections
-#   One for the /blocking request and the other for the /:sleep request
-# Requires max_clients = 1.  If greater than 1 the Manager will direct subsequent app requests to workers in a block state.
-# If 1, the Manager will not direct any additional requests to a worker that already has a connection with a client.
+# In this particular example app, requires approx (looking for exact) twice as many workers (-w) as concurrent connections expected to handle
+#   One for the /blocking request and the other for the /:sleep request (the daemon server provides only one process)
+# Requires max_clients = 1 (not enforceable, so just do -c 1 with prefork command).  If you were to choose greater than 1, the Manager will direct subsequent app requests to workers in a block state, so don't do that.
+# If 1, the Manager will not direct any additional requests to a worker that already has a connection with a client and will instead find an available worker to connect to.
 get '/blocking/:sleep' => {sleep => 0} => sub {
 	my $self = shift;
-	return $self->render_not_found if $$ == $manager; # Disable this route if the app isn't prefork'd.
+	return $self->render_not_found if $$ == $manager; # Disable this route if the app isn't prefork'd.  Workers should be large enough to handle your concurrent requests and max_clients should be 1.
 	my $sleep = $self->param('sleep');
-	$self->app->log->info("[$$] Entering /blocking/$sleep");
-	$self->app->log->info("[$$] Stand by while waiting for response from get request.  No other app requests will be processed by [$$] until get response received.");
-	$self->ua->get("$me/$sleep/$$"); # Blocking...
+	$self->app->log->info("[$$] I am prefork'd.  For this study, please ensure that -w is 2x your concurrent connections and -c is 1.");
+	$self->app->log->info("[$$] Stand by while I [$$] fetch another URL.\nI will block; nothing else will be done by me [$$] until* I get a response from the URL I requested and I will then precede to render my response to you.\n* (or until I time out and give up)");
+	my $sleeper = $self->ua->get("$me/$sleep" => json => {block=>1, caller=>$$})->res->json->{sleeper}; # Blocking...
 	# Won't reach here until a response is supplied to get
-	$self->app->log->info("[$$] Rendering and Exiting /blocking/$sleep after having waited to get /$sleep/$$.  This process [$$] was blocked from doing anything else while waiting for the response.");
-	$self->render(text => "[$$] get('/$sleep/$$') took $sleep seconds receive a response.  This process [$$] was blocked from doing anything else while waiting for the response.\n");
+	$self->app->log->info("[$$] A response from the URL [$sleeper] fetched $sleep seconds ago has been returned to me [$$] and I am now rendering my response.");
+	$self->render(text => $sleep);
 };
 
-# May benefit from additional workers, requires max_clients is sufficiently large (1000?)
+# May benefit from preforking and having additional workers but this study is not about that
+# Requires max_clients is sufficiently large (default is 1000 so just go with that)
 get '/non-blocking/:sleep' => {sleep => 0} => sub {
 	my $self = shift;
+#	return $self->render_not_found unless $$ == $manager; # For simplicity, disable this route if the app is prefork'd.  There should be no workers and max_clients should be the default 1000.
 	$self->render_later; # Disable automatic rendering to delay response generation, only necessary if automatic rendering would result in a response.
 	my $sleep = $self->param('sleep');
-	$self->ua->get("$me/$sleep/$$" => sub { # Non-blocking
+	$self->app->log->info("[$$] I am daemon'd.  For this study, Please ensure that -c is large (don't supply a value) and -w is not valid.");
+	$self->app->log->info("[$$] Excuse me while I [$$] fetch another URL.\nI will not block; I [$$] will process other requests until* I get a response from the URL I requested and I will then precede to render my response to you.\n* (or until I timeout and give up)");
+	$self->ua->get("$me/$sleep" => json => {block=>0, caller=>$$} => sub { # Non-blocking
 		# This callback will be processed once a response is supplied to get
-		$self->render(text => "[$$] slept for $sleep seconds.  Didn't block.\n");
+		my ($ua, $tx) = @_;
+		my $sleeper = $tx->res->json->{sleeper};
+		$self->app->log->info("[$$] A response from the URL [$sleeper] fetched $sleep seconds ago has been returned to me [$$] and I am now rendering my response.");
+		$self->render(text => $sleep);
 	});
 	# Reaches here immediately after sending the get request; allows handling of additional requests before rendering of this route response occurs
 	# render_later keeps this route from generating an automatic response.
-	$self->app->log->info("Sent get request, [$$] proceeding to process subsequent app requests.");
+	$self->app->log->info("[$$] The URL I requested is being fetched right now.  Because you requested to not block, max_clients must be set to greater than 1 and therefore I can process additional requests while I wait for a response from that URL.");
 };
  
 # This route is to emulate a slow web request
-get '/:sleep/:caller' => {sleep => 0} => sub {
+get '/:sleep' => {sleep => 0} => sub {
 	my $self = shift;
 	my $sleep = $self->param('sleep');
-	my $caller = $self->param('caller');
-	$self->app->log->info("[$caller -> $$] Entering /$sleep/$caller");
-	return $self->render(json=>{ok => Mojo::JSON->false, sleep => $sleep}) unless $sleep; # 0 seconds, just do it
-	$self->app->log->info("[$caller -> $$] Going to sleep for $sleep seconds");
+	my ($block, $caller) = map { $self->req->json->{$_} } qw/block caller/;
+	$self->app->log->info("[$$] I am a URL being fetched by $caller.  I'm about to do something that will take $sleep seconds.");
+	return $self->render(json=>{ok => Mojo::JSON->false, sleep => $sleep, caller => $caller, pid => $$}) unless $sleep; # 0 second sleep so just do it
 	$self->render_later; # Disable automatic rendering to delay response generation, only necessary if automatic rendering would result in a response.
 	Mojo::IOLoop->timer($sleep => sub {
-		$self->app->log->info("[$caller -> $$] Rendering /$sleep/$caller after having slept for $sleep seconds");
-		return $self->render(json=>{ok => Mojo::JSON->true, sleep => $sleep});
+		# This callback will be processed once a the timer is reached
+		$self->app->log->info("[$$] It turns out I was just supposed to sleep for $sleep seconds; rendering my response back to $caller now.");
+		return $self->render(json=>{ok => Mojo::JSON->true, sleep => $sleep, caller => $caller, sleeper => $$});
 	});
 	# Reaches here immediately after setting the timer; allows handling of additional requests before rendering of this route response occurs
 	# render_later keeps this route from generating an automatic response.
-	$self->app->log->info("[$caller -> $$] Exiting /$sleep/$caller but sleeping in the background.  I *think* that means that [$$] can process subsequent app requests. ");
+	if ( $block ) {
+		$self->app->log->info("[$$] That thing I'm supposed to be doing is getting done right now.  Because you requested to block, max_clients must be set to 1 and therefore I cannot process any additional requests while that thing I'm supposed to be doing is getting done.  Sorry.  Don't request to block!");
+	} else {
+		$self->app->log->info("[$$] That thing I'm supposed to be doing is getting done right now.  Because you requested to not block, max_clients must be set to greater than 1 and therefore I can process additional requests while that thing I'm supposed to be doing is getting done.  Yeah!  Good for you requesting to not block!");
+	}
 };
 
 app->start;
