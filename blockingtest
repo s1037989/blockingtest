@@ -2,7 +2,7 @@
 
 use Mojolicious::Lite;
 
-my $me = 'http://localhost:3000';
+my $me = 'http://localhost:3000'; # Make sure that MOJO_LISTEN is unset
 my $manager = $$;
 
 # Requires preforking server, and sufficient workers for the number of concurrent connections
@@ -10,6 +10,7 @@ my $manager = $$;
 #   One for the /blocking request and the other for the /:sleep request (the daemon server provides only one process)
 # Requires max_clients = 1 (not enforceable, so just do -c 1 with prefork command).  If you were to choose greater than 1, the Manager will direct subsequent app requests to workers in a block state, so don't do that.
 # If 1, the Manager will not direct any additional requests to a worker that already has a connection with a client and will instead find an available worker to connect to.
+# e.g. perl blockingtest prefork -w 50 -c 1
 get '/blocking/:sleep' => {sleep => 0} => sub {
 	my $self = shift;
 	return $self->render_not_found if $$ == $manager; # Disable this route if the app isn't prefork'd.  Workers should be large enough to handle your concurrent requests and max_clients should be 1.
@@ -24,9 +25,12 @@ get '/blocking/:sleep' => {sleep => 0} => sub {
 
 # May benefit from preforking and having additional workers but this study is not about that
 # Requires max_clients is sufficiently large (default is 1000 so just go with that)
+# e.g. perl blockingtest daemon
 get '/non-blocking/:sleep' => {sleep => 0} => sub {
 	my $self = shift;
-#	return $self->render_not_found unless $$ == $manager; # For simplicity, disable this route if the app is prefork'd.  There should be no workers and max_clients should be the default 1000.
+	if ( $ENV{DISABLE_NONBLOCK_PREFORK} ) {
+		return $self->render_not_found unless $$ == $manager; # For simplicity, disable this route if the app is prefork'd.  There should be no workers and max_clients should be the default 1000.
+	}
 	$self->render_later; # Disable automatic rendering to delay response generation, only necessary if automatic rendering would result in a response.
 	my $sleep = $self->param('sleep');
 	$self->app->log->info("[$$] I am daemon'd.  For this study, Please ensure that -c is large (don't supply a value) and -w is not valid.");
