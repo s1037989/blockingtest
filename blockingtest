@@ -2,24 +2,43 @@
 
 use Mojolicious::Lite;
 
-my $me = 'http://localhost:3000'; # Make sure that MOJO_LISTEN is unset
-my $manager = $$;
+my $me = 'http://localhost:3000';
 
-# Requires preforking server, and sufficient workers for the number of concurrent connections
-# In this particular example app, requires approx (looking for exact) twice as many workers (-w) as concurrent connections expected to handle
-#   One for the /blocking request and the other for the /:sleep request (the daemon server provides only one process)
-# Requires max_clients = 1 (not enforceable, so just do -c 1 with prefork command).  If you were to choose greater than 1, the Manager will direct subsequent app requests to workers in a block state, so don't do that.
-# If 1, the Manager will not direct any additional requests to a worker that already has a connection with a client and will instead find an available worker to connect to.
+print <<EOL;
+
+[$$] Hello!  Welcome to the blocking test which provides demonstration and explanation regarding the differences betweek blocking and non-blocking operations in your Mojolicious web server.
+To most effectively use and benefit from this tool, you will want to have several terminals open so that you can start the web server, compare the informational messages supplied by the web server terminal, and one or more terminals by which to fire of requests to the web server typically using curl but also concurrent requests using a tool like ApacheBench.
+
+EOL
+
+helper info => sub {
+	my $self = shift;
+	$self->app->log->info("[$$] ".MyApp::message(@_));
+};
+
 # e.g. perl blockingtest prefork -w 50 -c 1
 get '/blocking/:sleep' => {sleep => 0} => sub {
 	my $self = shift;
-	return $self->render_not_found if $$ == $manager; # Disable this route if the app isn't prefork'd.  Workers should be large enough to handle your concurrent requests and max_clients should be 1.
+	my $max_clients = $::server->max_clients;
+	my $workers = $::server->can('workers') ? $::server->workers : 1;
+	if ( $workers == 1 ) { 
+		$self->info('blocktest worker');
+		return $self->render_not_found;
+	}
+	if ( $max_clients != 1 ) {
+		$self->info('blocktest max_clients');
+		return $self->render_not_found;
+	}
 	my $sleep = $self->param('sleep');
-	$self->app->log->info("[$$] I am prefork'd.  For this study, please ensure that -w is 2x your concurrent connections and -c is 1.");
-	$self->app->log->info("[$$] Stand by while I [$$] fetch another URL.\nI will block; nothing else will be done by me [$$] until* I get a response from the URL I requested and I will then precede to render my response to you.\n* (or until I time out and give up)");
+	$self->info('blocktest workers max_client', $workers, $max_clients);
+	$self->info(<<EOT);
+Now, stand by while I [$$] fetch another URL.\nI will block; nothing else will be done by me [$$] until I get a response from the URL I requested and I will then precede to render my response to you.
+EOT
 	my $sleeper = $self->ua->get("$me/$sleep" => json => {block=>1, caller=>$$})->res->json->{sleeper}; # Blocking...
 	# Won't reach here until a response is supplied to get
-	$self->app->log->info("[$$] A response from the URL [$sleeper] fetched $sleep seconds ago has been returned to me [$$] and I am now rendering my response.");
+	$self->info(<<EOT);
+A response from the URL [$sleeper] fetched $sleep seconds ago has been returned to me [$$] and I am now rendering my response and releasing my blocked state.
+EOT
 	$self->render(text => $sleep);
 };
 
@@ -28,13 +47,32 @@ get '/blocking/:sleep' => {sleep => 0} => sub {
 # e.g. perl blockingtest daemon
 get '/non-blocking/:sleep' => {sleep => 0} => sub {
 	my $self = shift;
-	if ( $ENV{DISABLE_NONBLOCK_PREFORK} ) {
-		return $self->render_not_found unless $$ == $manager; # For simplicity, disable this route if the app is prefork'd.  There should be no workers and max_clients should be the default 1000.
+	my $max_clients = $::server->max_clients;
+	my $workers = $::server->can('workers') ? $::server->workers : 1;
+	if ( $workers == 1 && $max_clients == 1 ) { 
+		$self->app->log->info("[$$] This route is disabled when served by a single-process worker or daemon and the maximum number of concurrent clients is 1 because multiple concurrent connections cannot be handled by a single process when there is an operation that blocks.");
+		return $self->render_not_found;
+	} elsif ( $workers == 1 && $max_clients > 1 ) {
+		$self->app->log->info("[$$] When served by a single-process daemon please ensure that the maximum number of concurrent clients is at least as many as you expect concurrent connections.  For this study, because the routes fetch a URL from this app, please ensure that there are twice as many workers as your expected concurrent connections.");
+	} elsif ( $workers > 1 && $max_clients == 1 ) { 
+		$self->app->log->info("[$$] This route is disabled when served by a single-process worker or daemon and the maximum number of concurrent clients is 1 because multiple concurrent connections cannot be handled by a single process when there is an operation that blocks.");
+		return $self->render_not_found;
+	} elsif ( $workers > 1 && $max_clients > 1 ) {
+		$self->app->log->info("[$$] When served by a single-process daemon please ensure that the maximum number of concurrent clients is at least as many as you expect concurrent connections.  For this study, because the routes fetch a URL from this app, please ensure that there are twice as many workers as your expected concurrent connections.");
+	} else {
+		if ( $max_clients == 1 ) {
+			if ( $workers == 1 ) {
+				$self->app->log->info("[$$] App is prefork'd -- This route is disabled when served by a single worker and the maximum number of concurrent clients is 1.");
+				return $self->render_not_found;
+			} elsif ( $workers > 1 ) {
+				$self->app->log->info("[$$] App is prefork'd.  When served by workers with a maximum number of concurrent connections of 1, please ensure that there are as many workers as you expect concurrent connections.  For this study, because the routes fetch a URL from this app, please ensure that there are twice as many workers as your expected concurrent connections.");
+			}
+		} elsif ( $max_clients > 1 ) {
+			$self->app->log->info("[$$] App is prefork'd.  When served by a single-process daemon please ensure that the maximum number of concurrent clients is greater than 1.");
+		}
 	}
-	$self->render_later; # Disable automatic rendering to delay response generation, only necessary if automatic rendering would result in a response.
 	my $sleep = $self->param('sleep');
-	$self->app->log->info("[$$] I am daemon'd.  For this study, Please ensure that -c is large (don't supply a value) and -w is not valid.");
-	$self->app->log->info("[$$] Excuse me while I [$$] fetch another URL.\nI will not block; I [$$] will process other requests until* I get a response from the URL I requested and I will then precede to render my response to you.\n* (or until I timeout and give up)");
+	$self->app->log->info("[$$] Now, excuse me while I [$$] fetch another URL.\nI will not block; I [$$] will process other requests until* I get a response from the URL I requested and I will then precede to render my response to you.\n* (or until I timeout and give up)");
 	$self->ua->get("$me/$sleep" => json => {block=>0, caller=>$$} => sub { # Non-blocking
 		# This callback will be processed once a response is supplied to get
 		my ($ua, $tx) = @_;
@@ -43,8 +81,8 @@ get '/non-blocking/:sleep' => {sleep => 0} => sub {
 		$self->render(text => $sleep);
 	});
 	# Reaches here immediately after sending the get request; allows handling of additional requests before rendering of this route response occurs
-	# render_later keeps this route from generating an automatic response.
 	$self->app->log->info("[$$] The URL I requested is being fetched right now.  Because you requested to not block, max_clients must be set to greater than 1 and therefore I can process additional requests while I wait for a response from that URL.");
+	$self->render_later; # Keep this route from generating an automatic response
 };
  
 # This route is to emulate a slow web request
@@ -69,4 +107,134 @@ get '/:sleep' => {sleep => 0} => sub {
 	}
 };
 
-app->start;
+app->start(@ARGV, '-l', $me);
+
+package MyApp;
+
+sub message {
+	my $message = shift;
+	local %_ = (
+		'blocktest worker' => 'This route is disabled when served by a single-process worker or daemon because multiple concurrent connections cannot be handled by a single process when there is an operation that blocks.',
+		'blocktest max_clients' => 'This route is disabled when max_clients is not 1.\nWhen greater than 1 the Manager will direct subsequent app requests to workers in a block state.  However, when 1, as is required to access this route, the Manager will not direct any additional requests to a worker that already has a connection with a client and will instead find an available worker to connect to.',
+		'blocktest workers max_client' => 'Number of workers is %s and max_clients is %s.  There should be as many workers as you expect concurrent connections.  For this study, because the routes fetch a URL from this very app, please ensure that there are twice as many workers as your expected concurrent connections because one process will be busy handling the test case while another process is busy representing a slow http request.',
+	);
+	return sprintf(($_{$message}||$message), @_);
+}
+
+package Mojolicious::Command::daemon;
+use Mojo::Base 'Mojolicious::Command';
+
+use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
+use Mojo::Server::Daemon;
+
+has description => "Start application with HTTP and WebSocket server.\n";
+has usage       => <<EOF;
+usage: $0 daemon [OPTIONS]
+
+These options are available:
+  -b, --backlog <size>         Listen backlog size, defaults to SOMAXCONN.
+  -c, --clients <number>       Maximum number of concurrent clients, defaults
+                               to 1000.
+  -g, --group <name>           Group name for process.
+  -i, --inactivity <seconds>   Inactivity timeout, defaults to the value of
+                               MOJO_INACTIVITY_TIMEOUT or 15.
+  -l, --listen <location>      One or more locations you want to listen on,
+                               defaults to the value of MOJO_LISTEN or
+                               "http://*:3000".
+  -p, --proxy                  Activate reverse proxy support, defaults to
+                               the value of MOJO_REVERSE_PROXY.
+  -r, --requests <number>      Maximum number of requests per keep-alive
+                               connection, defaults to 25.
+  -u, --user <name>            Username for process.
+EOF
+
+sub run {
+  my ($self, @args) = @_;
+
+  $::server = Mojo::Server::Daemon->new(app => $self->app);
+  GetOptionsFromArray \@args,
+    'b|backlog=i'    => sub { $::server->backlog($_[1]) },
+    'c|clients=i'    => sub { $::server->max_clients($_[1]) },
+    'g|group=s'      => sub { $::server->group($_[1]) },
+    'i|inactivity=i' => sub { $::server->inactivity_timeout($_[1]) },
+    'l|listen=s'     => \my @listen,
+    'p|proxy' => sub { $ENV{MOJO_REVERSE_PROXY} = 1 },
+    'r|requests=i' => sub { $::server->max_requests($_[1]) },
+    'u|user=s'     => sub { $::server->user($_[1]) };
+
+  $::server->listen(\@listen) if @listen;
+  $::server->run;
+}
+
+package Mojolicious::Command::prefork;
+use Mojo::Base 'Mojolicious::Command';
+
+use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
+use Mojo::Server::Prefork;
+
+has description =>
+  "Start application with preforking HTTP and WebSocket server.\n";
+has usage => <<EOF;
+usage: $0 prefork [OPTIONS]
+
+These options are available:
+  -A, --accepts <number>               Number of connections for workers to
+                                       accept, defaults to 1000.
+  -a, --accept-interval <seconds>      Accept interval, defaults to 0.025.
+  -b, --backlog <size>                 Listen backlog size, defaults to
+                                       SOMAXCONN.
+  -c, --clients <number>               Maximum number of concurrent clients,
+                                       defaults to 1000.
+  -G, --graceful-timeout <seconds>     Graceful timeout, defaults to 20.
+  -g, --group <name>                   Group name for process.
+      --heartbeat-interval <seconds>   Heartbeat interval, defaults to 5.
+  -H, --heartbeat-timeout <seconds>    Heartbeat timeout, defaults to 20.
+  -i, --inactivity <seconds>           Inactivity timeout, defaults to the
+                                       value of MOJO_INACTIVITY_TIMEOUT or 15.
+      --lock-file <path>               Path to lock file, defaults to a random
+                                       file.
+  -L, --lock-timeout <seconds>         Lock timeout, defaults to 1.
+  -l, --listen <location>              One or more locations you want to
+                                       listen on, defaults to the value of
+                                       MOJO_LISTEN or "http://*:3000".
+      --multi-accept <number>          Number of connection to accept at once,
+                                       defaults to 50.
+  -P, --pid-file <path>                Path to process id file, defaults to a
+                                       random file.
+  -p, --proxy                          Activate reverse proxy support,
+                                       defaults to the value of
+                                       MOJO_REVERSE_PROXY.
+  -r, --requests <number>              Maximum number of requests per
+                                       keep-alive connection, defaults to 25.
+  -u, --user <name>                    Username for process.
+  -w, --workers <number>               Number of workers, defaults to 4.
+EOF
+
+sub run {
+  my ($self, @args) = @_;
+
+  $::server = Mojo::Server::Prefork->new(app => $self->app);
+  GetOptionsFromArray \@args,
+    'A|accepts=i'           => sub { $::server->accepts($_[1]) },
+    'a|accept-interval=f'   => sub { $::server->accept_interval($_[1]) },
+    'b|backlog=i'           => sub { $::server->backlog($_[1]) },
+    'c|clients=i'           => sub { $::server->max_clients($_[1]) },
+    'G|graceful-timeout=i'  => sub { $::server->graceful_timeout($_[1]) },
+    'g|group=s'             => sub { $::server->group($_[1]) },
+    'heartbeat-interval=i'  => sub { $::server->heartbeat_interval($_[1]) },
+    'H|heartbeat-timeout=i' => sub { $::server->heartbeat_timeout($_[1]) },
+    'i|inactivity=i'        => sub { $::server->inactivity_timeout($_[1]) },
+    'lock-file=s'           => sub { $::server->lock_file($_[1]) },
+    'L|lock-timeout=f'      => sub { $::server->lock_timeout($_[1]) },
+    'l|listen=s'     => \my @listen,
+    'multi-accept=i' => sub { $::server->multi_accept($_[1]) },
+    'P|pid-file=s'   => sub { $::server->pid_file($_[1]) },
+    'p|proxy'        => sub { $ENV{MOJO_REVERSE_PROXY} = 1 },
+    'r|requests=i' => sub { $::server->max_requests($_[1]) },
+    'u|user=s'     => sub { $::server->user($_[1]) },
+    'w|workers=i'  => sub { $::server->workers($_[1]) };
+
+  $::server->listen(\@listen) if @listen;
+  $::server->run;
+}
+
